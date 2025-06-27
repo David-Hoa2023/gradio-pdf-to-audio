@@ -219,6 +219,29 @@ def fix_extracted_text(raw_text: str):
     return status, fixed_text
 
 
+def split_text_for_tts(text: str, max_chunk_size: int = 250) -> list[str]:
+    """Split text into chunks suitable for TTS while preserving sentence boundaries."""
+    sentences = text.replace('!', '.').replace('?', '.').split('.')
+    sentences = [s.strip() + '.' for s in sentences if s.strip()]
+    
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        # If adding this sentence would exceed the limit, start a new chunk
+        if len(current_chunk) + len(sentence) + 1 > max_chunk_size and current_chunk:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence + " "
+        else:
+            current_chunk += sentence + " "
+    
+    # Add the last chunk if it has content
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks if chunks else [text[:max_chunk_size]]
+
+
 def generate_audio_from_text(
     model,
     text_to_synthesize,
@@ -231,37 +254,56 @@ def generate_audio_from_text(
     top_p,
     repetition_penalty
 ):
-    """Generate audio from the provided text."""
+    """Generate audio from the provided text, handling long texts by chunking."""
     if model is None:
         model = ChatterboxTTS.from_pretrained(DEVICE)
     
     if not text_to_synthesize or text_to_synthesize.strip() == "":
         return None, "Please provide text to synthesize", ""
     
-    # Limit text length for TTS
-    if len(text_to_synthesize) > 300:
-        text_to_synthesize = text_to_synthesize[:297] + "..."
-    
     if seed_num != 0:
         set_seed(int(seed_num))
     
-    # Generate audio
     try:
-        wav = model.generate(
-            text_to_synthesize,
-            audio_prompt_path=audio_prompt_path,
-            exaggeration=exaggeration,
-            temperature=temperature,
-            cfg_weight=cfgw,
-            min_p=min_p,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-        )
+        # Split text into manageable chunks
+        text_chunks = split_text_for_tts(text_to_synthesize, max_chunk_size=250)
         
-        return (model.sr, wav.squeeze(0).numpy()), f"Successfully generated audio for: {text_to_synthesize[:100]}...", text_to_synthesize
+        print(f"🔄 Processing {len(text_chunks)} text chunks...")
+        
+        # Generate audio for each chunk
+        audio_segments = []
+        total_chars = len(text_to_synthesize)
+        
+        for i, chunk in enumerate(text_chunks):
+            print(f"🎙️  Generating audio for chunk {i+1}/{len(text_chunks)} ({len(chunk)} chars)")
+            
+            wav = model.generate(
+                chunk,
+                audio_prompt_path=audio_prompt_path,
+                exaggeration=exaggeration,
+                temperature=temperature,
+                cfg_weight=cfgw,
+                min_p=min_p,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+            )
+            
+            # Add a small pause between chunks (0.3 seconds of silence)
+            pause_samples = int(0.3 * model.sr)
+            pause = np.zeros((1, pause_samples), dtype=wav.dtype)
+            
+            audio_segments.append(wav.squeeze(0).numpy())
+            if i < len(text_chunks) - 1:  # Don't add pause after last chunk
+                audio_segments.append(pause.squeeze(0))
+        
+        # Concatenate all audio segments
+        final_audio = np.concatenate(audio_segments)
+        
+        status_msg = f"✅ Generated audio for {total_chars} characters in {len(text_chunks)} chunks"
+        return (model.sr, final_audio), status_msg, text_to_synthesize
     
     except Exception as e:
-        return None, f"Error generating audio: {str(e)}", ""
+        return None, f"❌ Error generating audio: {str(e)}", ""
 
 
 def generate_from_text(
@@ -276,23 +318,65 @@ def generate_from_text(
     top_p,
     repetition_penalty
 ):
+    """Generate audio from text with automatic chunking for longer texts."""
     if model is None:
         model = ChatterboxTTS.from_pretrained(DEVICE)
 
     if seed_num != 0:
         set_seed(int(seed_num))
 
-    wav = model.generate(
-        text,
-        audio_prompt_path=audio_prompt_path,
-        exaggeration=exaggeration,
-        temperature=temperature,
-        cfg_weight=cfgw,
-        min_p=min_p,
-        top_p=top_p,
-        repetition_penalty=repetition_penalty,
-    )
-    return (model.sr, wav.squeeze(0).numpy())
+    try:
+        # For texts longer than 250 chars, use chunking
+        if len(text) > 250:
+            text_chunks = split_text_for_tts(text, max_chunk_size=250)
+            print(f"🔄 Processing {len(text_chunks)} text chunks for direct TTS...")
+            
+            audio_segments = []
+            for i, chunk in enumerate(text_chunks):
+                print(f"🎙️  Generating chunk {i+1}/{len(text_chunks)}")
+                
+                wav = model.generate(
+                    chunk,
+                    audio_prompt_path=audio_prompt_path,
+                    exaggeration=exaggeration,
+                    temperature=temperature,
+                    cfg_weight=cfgw,
+                    min_p=min_p,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                )
+                
+                # Add small pause between chunks
+                pause_samples = int(0.3 * model.sr)
+                pause = np.zeros((1, pause_samples), dtype=wav.dtype)
+                
+                audio_segments.append(wav.squeeze(0).numpy())
+                if i < len(text_chunks) - 1:
+                    audio_segments.append(pause.squeeze(0))
+            
+            # Concatenate all segments
+            final_audio = np.concatenate(audio_segments)
+            return (model.sr, final_audio)
+        else:
+            # For short texts, generate directly
+            wav = model.generate(
+                text,
+                audio_prompt_path=audio_prompt_path,
+                exaggeration=exaggeration,
+                temperature=temperature,
+                cfg_weight=cfgw,
+                min_p=min_p,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+            )
+            return (model.sr, wav.squeeze(0).numpy())
+    
+    except Exception as e:
+        print(f"Error in direct TTS generation: {e}")
+        # Fallback to basic generation with truncated text
+        truncated_text = text[:250] if len(text) > 250 else text
+        wav = model.generate(truncated_text, audio_prompt_path=audio_prompt_path)
+        return (model.sr, wav.squeeze(0).numpy())
 
 
 def save_text_to_file(text: str, filename: str = None, metadata: dict = None) -> str:
@@ -447,9 +531,9 @@ with gr.Blocks(title="PDF to Audio Converter") as demo:
             with gr.Row():
                 with gr.Column():
                     direct_text = gr.Textbox(
-                        value="Enter your text here for direct text-to-speech conversion.",
-                        label="Text to synthesize (max chars 300)",
-                        max_lines=5
+                        value="Enter your text here for direct text-to-speech conversion. Long texts will be automatically chunked for optimal quality.",
+                        label="Text to synthesize (supports long texts with automatic chunking)",
+                        max_lines=10
                     )
                     
                     with gr.Row():
