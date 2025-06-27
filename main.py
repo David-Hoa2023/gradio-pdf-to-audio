@@ -290,7 +290,7 @@ def generate_audio_from_text(
             
             # Add a small pause between chunks (0.3 seconds of silence)
             pause_samples = int(0.3 * model.sr)
-            pause = np.zeros((1, pause_samples), dtype=wav.dtype)
+            pause = np.zeros((1, pause_samples), dtype=np.float32)
             
             audio_segments.append(wav.squeeze(0).numpy())
             if i < len(text_chunks) - 1:  # Don't add pause after last chunk
@@ -348,7 +348,7 @@ def generate_from_text(
                 
                 # Add small pause between chunks
                 pause_samples = int(0.3 * model.sr)
-                pause = np.zeros((1, pause_samples), dtype=wav.dtype)
+                pause = np.zeros((1, pause_samples), dtype=np.float32)
                 
                 audio_segments.append(wav.squeeze(0).numpy())
                 if i < len(text_chunks) - 1:
